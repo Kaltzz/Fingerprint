@@ -1,0 +1,288 @@
+<?php
+
+require('vendor/autoload.php');
+
+use \PhpMqtt\Client\MqttClient;
+use \PhpMqtt\Client\ConnectionSettings;
+
+$server   = 'localhost';
+$port     = 1883;
+$clientId = rand(5, 15);
+$username = 'rafly';
+$password = '123456';
+$clean_session = false;
+$mqtt_version = MqttClient::MQTT_3_1_1;
+
+date_default_timezone_set('Asia/Makassar');
+
+
+// Koneksi ke database MySQL
+$conn = mysqli_connect("10.2.15.154", "adminn", "123456", "absensi");
+// Periksa koneksi database
+if (!$conn) {
+    die("Koneksi gagal: " . mysqli_connect_error());
+}
+
+$connectionSettings = (new ConnectionSettings)
+  ->setUsername($username)
+  ->setPassword($password)
+  ->setKeepAliveInterval(60)
+  ->setLastWillTopic('/sensor/fingerMaha')
+  ->setLastWillMessage('client disconnect')
+  ->setLastWillQualityOfService(1);
+
+$mqtt = new MqttClient($server, $port, $clientId, $mqtt_version);
+$mqtt->connect($connectionSettings, $clean_session);
+printf("client connected\n");
+
+$mqtt->subscribe('node1/finger/fingerMaha', function ($topic, $message) use ($conn) {
+    printf("Received message on topic [%s]: %s\n", $topic, $message);
+
+    $fingerprintID = intval($message); // Ensure $message is an integer
+
+    // Sanitize and validate $fingerprintID if necessary
+
+    $sql = "SELECT nama_mahasiswa FROM mahasiswa WHERE id_fingerprint = $fingerprintID";
+    $result = $conn->query($sql);
+
+    if ($result) {
+        if ($result->num_rows > 0) {
+            $row = $result->fetch_assoc();
+            $nama_mahasiswa = $row["nama_mahasiswa"];
+
+            $tanggal = date("Y-m-d");
+            $waktu = date("H:i:s");
+
+            // Check for existing checkin for the student on the given date
+            $checkin_sql = "SELECT * FROM node1_absen WHERE nama_mahasiswa = ? AND tanggal = ?";
+            $checkin_stmt = $conn->prepare($checkin_sql);
+            $checkin_stmt->bind_param("ss", $nama_mahasiswa, $tanggal);
+            $checkin_stmt->execute();
+            $existing_checkin = $checkin_stmt->get_result()->fetch_assoc();
+
+            if ($existing_checkin) {
+                // If checkin1 exists, update checkin2 if it doesn't exist
+                if (empty($existing_checkin['checkin2'])) {
+                    $update_checkin2_sql = "UPDATE node1_absen SET checkin2 = ? WHERE nama_mahasiswa = ? AND tanggal = ?";
+                    $update_checkin2_stmt = $conn->prepare($update_checkin2_sql);
+                    $update_checkin2_stmt->bind_param("sss", $waktu, $nama_mahasiswa, $tanggal);
+
+                    if ($update_checkin2_stmt->execute()) {
+                        echo "Checkin2 time has been updated for student: " . $nama_mahasiswa . "\n";
+                    } else {
+                        echo "Error updating checkin2 time: " . $update_checkin2_stmt->error;
+                    }
+                // If checkin2 exists, update checkout
+                } elseif ($existing_checkin['checkout'] === '00:00:00') {
+                    $update_checkout_sql = "UPDATE node1_absen SET checkout = ? WHERE nama_mahasiswa = ? AND tanggal = ?";
+                    $update_checkout_stmt = $conn->prepare($update_checkout_sql);
+                    $update_checkout_stmt->bind_param("sss", $waktu, $nama_mahasiswa, $tanggal);
+
+                    if ($update_checkout_stmt->execute()) {
+                        echo "Checkout time has been updated for student: " . $nama_mahasiswa . "\n";
+                    } else {
+                        echo "Error updating checkout time: " . $update_checkout_stmt->error;
+                    }
+                } else {
+                    echo "Checkout already set for student: " . $nama_mahasiswa . "\n";
+                }
+            } else {
+                // If no checkin exists, insert checkin1
+                $insert_checkin_sql = "INSERT INTO node1_absen (nama_mahasiswa, tanggal, checkin1, checkin2, checkout) VALUES (?, ?, ?, '', '00:00:00')";
+                $insert_checkin_stmt = $conn->prepare($insert_checkin_sql);
+                $insert_checkin_stmt->bind_param("sss", $nama_mahasiswa, $tanggal, $waktu);
+
+                if ($insert_checkin_stmt->execute()) {
+                    echo "Attendance data successfully added as checkin1 for student: " . $nama_mahasiswa . "\n";
+                } else {
+                    echo "Error inserting checkin1 data: " . $insert_checkin_stmt->error;
+                }
+            }
+        } else {
+            echo "No student ID matches the fingerprint.\n";
+        }
+    } else {
+        echo "Error: " . $sql . "<br>" . $conn->error;
+    }
+}, 0);
+
+
+
+
+$mqtt->subscribe('node2/finger/fingerMaha', function ($topic, $message) use ($conn) {
+    printf("Received message on topic [%s]: %s\n", $topic, $message);
+
+    $fingerprintID = intval($message); // Ensure $message is an integer
+
+    // Sanitize and validate $fingerprintID if necessary
+
+    $sql = "SELECT nama_mahasiswa FROM mahasiswa WHERE id_fingerprint = $fingerprintID";
+    $result = $conn->query($sql);
+
+    if ($result) {
+        if ($result->num_rows > 0) {
+            $row = $result->fetch_assoc();
+            $nama_mahasiswa = $row["nama_mahasiswa"];
+
+            $tanggal = date("Y-m-d");
+            $waktu = date("H:i:s");
+
+            // Check for existing checkin for the student on the given date
+            $checkin_sql = "SELECT * FROM node2_absen WHERE nama_mahasiswa = ? AND tanggal = ?";
+            $checkin_stmt = $conn->prepare($checkin_sql);
+            if (!$checkin_stmt) {
+                echo "Error preparing checkin SQL: " . $conn->error . "\n";
+                return;
+            }
+            $checkin_stmt->bind_param("ss", $nama_mahasiswa, $tanggal);
+            $checkin_stmt->execute();
+            $existing_checkin = $checkin_stmt->get_result()->fetch_assoc();
+
+            if ($existing_checkin) {
+                echo "Existing check-in found for student: $nama_mahasiswa\n";
+                echo "Checkin1: " . $existing_checkin['checkin1'] . ", Checkin2: " . $existing_checkin['checkin2'] . ", Checkout: " . $existing_checkin['checkout'] . "\n";
+
+                if (empty($existing_checkin['checkin2'])) {
+                    echo "Updating checkin2 for student: $nama_mahasiswa\n";
+                    $update_checkin2_sql = "UPDATE node2_absen SET checkin2 = ? WHERE nama_mahasiswa = ? AND tanggal = ?";
+                    $update_checkin2_stmt = $conn->prepare($update_checkin2_sql);
+                    if (!$update_checkin2_stmt) {
+                        echo "Error preparing update checkin2 SQL: " . $conn->error . "\n";
+                        return;
+                    }
+                    $update_checkin2_stmt->bind_param("sss", $waktu, $nama_mahasiswa, $tanggal);
+
+                    if ($update_checkin2_stmt->execute()) {
+                        echo "Checkin2 time has been updated for student: " . $nama_mahasiswa . "\n";
+                    } else {
+                        echo "Error updating checkin2 time: " . $update_checkin2_stmt->error . "\n";
+                    }
+                } elseif ($existing_checkin['checkout'] === '00:00:00') {
+                    echo "Updating checkout for student: $nama_mahasiswa\n";
+                    $update_checkout_sql = "UPDATE node2_absen SET checkout = ? WHERE nama_mahasiswa = ? AND tanggal = ?";
+                    $update_checkout_stmt = $conn->prepare($update_checkout_sql);
+                    if (!$update_checkout_stmt) {
+                        echo "Error preparing update checkout SQL: " . $conn->error . "\n";
+                        return;
+                    }
+                    $update_checkout_stmt->bind_param("sss", $waktu, $nama_mahasiswa, $tanggal);
+
+                    if ($update_checkout_stmt->execute()) {
+                        echo "Checkout time has been updated for student: " . $nama_mahasiswa . "\n";
+                    } else {
+                        echo "Error updating checkout time: " . $update_checkout_stmt->error . "\n";
+                    }
+                } else {
+                    echo "Checkout already set for student: " . $nama_mahasiswa . "\n";
+                }
+            } else {
+                echo "No existing check-in found. Inserting checkin1 for student: $nama_mahasiswa\n";
+                $insert_checkin_sql = "INSERT INTO node2_absen (nama_mahasiswa, tanggal, checkin1, checkin2, checkout) VALUES (?, ?, ?, NULL, '00:00:00')";
+                $insert_checkin_stmt = $conn->prepare($insert_checkin_sql);
+                if (!$insert_checkin_stmt) {
+                    echo "Error preparing insert checkin SQL: " . $conn->error . "\n";
+                    return;
+                }
+                $insert_checkin_stmt->bind_param("sss", $nama_mahasiswa, $tanggal, $waktu);
+
+                if ($insert_checkin_stmt->execute()) {
+                    echo "Attendance data successfully added as checkin1 for student: " . $nama_mahasiswa . "\n";
+                } else {
+                    echo "Error inserting checkin1 data: " . $insert_checkin_stmt->error . "\n";
+                }
+            }
+        } else {
+            echo "No student ID matches the fingerprint.\n";
+        }
+    } else {
+        echo "Error executing SQL: " . $sql . "<br>" . $conn->error . "\n";
+    }
+}, 0);
+
+
+
+
+
+$mqtt->subscribe('node3/finger/fingerMaha', function ($topic, $message) use ($conn) {
+    printf("Received message on topic [%s]: %s\n", $topic, $message);
+
+    $fingerprintID = intval($message); // Pastikan nilai dari $message adalah integer
+
+    // Lakukan sanitasi dan validasi terhadap nilai $fingerprintID di sini jika diperlukan
+
+    $sql3 = "SELECT nama_mahasiswa FROM mahasiswa WHERE id_fingerprint = $fingerprintID";
+
+$result3 = $conn->query($sql3);
+
+// ... (Kode sebelumnya untuk mendapatkan $result)
+
+if ($result3) {
+    if ($result3->num_rows > 0) {
+        $row = $result3->fetch_assoc();
+        $nama_mahasiswa = $row["nama_mahasiswa"];
+
+        $tanggal = date("Y-m-d");
+        $waktu = date("H:i:s");
+
+        // Periksa apakah sudah ada catatan checkin untuk tanggal dan mahasiswa tertentu
+        $checkin_sql3 = "SELECT * FROM node3_absen WHERE nama_mahasiswa = ? AND tanggal = ?";
+        $checkin_stmt3 = $conn->prepare($checkin_sql3);
+        $checkin_stmt3->bind_param("ss", $nama_mahasiswa, $tanggal);
+        $checkin_stmt3->execute();
+        $existing_checkin3 = $checkin_stmt3->get_result()->fetch_assoc();
+
+        if ($existing_checkin3) {
+            // Jika ada checkin, periksa nilai checkout
+            if ($existing_checkin3['checkout'] === '00:00:00') {
+                // Jika checkout masih 00:00:00, lakukan pembaruan pada checkout
+                $update_checkout_sql3 = "UPDATE node3_absen SET checkout = ? WHERE nama_mahasiswa = ? AND tanggal = ? AND checkout = '00:00:00'";
+                $update_checkout_stmt3 = $conn->prepare($update_checkout_sql3);
+                $update_checkout_stmt3->bind_param("sss", $waktu, $nama_mahasiswa, $tanggal);
+
+                if ($update_checkout_stmt3->execute()) {
+                    echo "Waktu checkout telah diperbarui untuk mahasiswa dengan nama: " . $nama_mahasiswa . "\n";
+                } else {
+                    echo "Error saat pembaruan waktu checkout: " . $update_checkout_stmt3->error;
+                }
+            } else {
+                echo "Checkout sudah diatur untuk mahasiswa dengan nama: " . $nama_mahasiswa . "\n";
+            }
+        } else {
+            // Jika belum ada checkin, lakukan pengisian data pada kolom checkin
+            $insert_checkin_sql3 = "INSERT INTO node3_absen (nama_mahasiswa, tanggal, checkin, checkout) VALUES (?, ?, ?, '')";
+            $insert_checkin_stmt3 = $conn->prepare($insert_checkin_sql3);
+            $insert_checkin_stmt3->bind_param("sss", $nama_mahasiswa, $tanggal, $waktu);
+
+            if ($insert_checkin_stmt3->execute()) {
+                echo "Data absen berhasil ditambahkan sebagai checkin untuk mahasiswa dengan nama: " . $nama_mahasiswa . "\n";
+            } else {
+                echo "Error saat penambahan data checkin: " . $insert_checkin_stmt3->error;
+            }
+        }
+    } else {
+        echo "Tidak ada ID mahasiswa yang sesuai dengan sidik jari.\n";
+    }
+} else {
+    echo "Error: " . $sql3 . "<br>" . $conn->error;
+}
+
+
+}, 0);
+
+$mqtt->subscribe('enroll/finger/fingerMaha', function ($topic, $message) use ($conn) {
+    printf("Received message on topic [%s]: %s\n", $topic, $message);
+
+    $finger = $message;
+
+    // Insert the data into the database
+    $sql4 = "INSERT INTO mahasiswa (id_fingerprint, nama_mahasiswa) VALUES ('$finger', '')";
+    if (mysqli_query($conn, $sql4)) {
+        echo "Data jari berhasil disimpan!\n";
+    } else {
+        echo "Error: " . $sql4 . "<br>" . mysqli_error($conn);
+    }
+}, 0);
+
+        
+$mqtt->loop(true);
+?>
